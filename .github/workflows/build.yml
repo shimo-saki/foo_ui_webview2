@@ -1,0 +1,124 @@
+name: Manual Build & Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: '编译配置'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+      include_resources:
+        description: '包含前端资源 (resources/dist)'
+        required: false
+        default: false
+        type: boolean
+      include_sdk:
+        description: '打包 SDK ZIP'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build-and-package:
+    name: Build and Package Component
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Clone columns_ui-sdk
+        run: |
+          git clone --depth=1 https://github.com/reupen/columns_ui-sdk.git lib/columns_ui-sdk
+          (Get-Content lib/columns_ui-sdk/ui_extension.h) `
+            -replace '\.\./pfc/', '../foobar2000_sdk/pfc/' `
+            -replace '\.\./foobar2000/', '../foobar2000_sdk/foobar2000/' |
+            Set-Content lib/columns_ui-sdk/ui_extension.h
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Restore NuGet packages
+        run: nuget restore foo_ui_webview2.sln
+
+      - name: Build and Package
+        shell: pwsh
+        env:
+          CONFIG: ${{ github.event.inputs.configuration }}
+          INCLUDE_RESOURCES: ${{ github.event.inputs.include_resources }}
+          INCLUDE_SDK: ${{ github.event.inputs.include_sdk }}
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
+          Write-Host "CONFIG: $env:CONFIG"
+          Write-Host "INCLUDE_RESOURCES: $env:INCLUDE_RESOURCES"
+          Write-Host "INCLUDE_SDK: $env:INCLUDE_SDK"
+
+          $Config = $env:CONFIG
+          $IncludeResources = [System.Convert]::ToBoolean($env:INCLUDE_RESOURCES)
+          $IncludeSDK = [System.Convert]::ToBoolean($env:INCLUDE_SDK)
+
+          Write-Host "Converted IncludeResources: $IncludeResources"
+          Write-Host "Converted IncludeSDK: $IncludeSDK"
+
+          # Splatting 参数
+          $params = @{
+            Configuration = $Config
+            Verbose       = $true
+          }
+          if ($IncludeResources) {
+            $params['IncludeResources'] = $true
+          }
+          if (-not $IncludeSDK) {
+            $params['IncludeSDK'] = $false
+          }
+
+          & .\build-package.ps1 @params
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "build-package.ps1 exited with code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+          # 检查 dist 目录
+          if (-not (Test-Path dist)) {
+            Write-Error "dist directory was not created by build-package.ps1"
+            exit 1
+          }
+          $pkgFiles = Get-ChildItem dist -Filter "*.fb2k-component" -ErrorAction SilentlyContinue
+          if (-not $pkgFiles) {
+            Write-Error "No .fb2k-component file found in dist"
+            exit 1
+          }
+          Write-Host "Package file(s) created:"
+          $pkgFiles | ForEach-Object { Write-Host $_.Name }
+
+      - name: List dist directory contents
+        shell: pwsh
+        run: |
+          if (Test-Path dist) {
+            Write-Host "Contents of dist:"
+            Get-ChildItem dist -Recurse | ForEach-Object { Write-Host $_.FullName }
+          } else {
+            Write-Host "dist directory does not exist"
+            exit 1
+          }
+
+      - name: Upload Component Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_ui_webview2-component
+          path: dist/*.fb2k-component
+          if-no-files-found: error
+
+      - name: Upload SDK Package
+        if: github.event.inputs.include_sdk == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_ui_webview2-sdk
+          path: dist/*-sdk-*.zip
+          if-no-files-found: warn
